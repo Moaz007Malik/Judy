@@ -1,0 +1,592 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Judy 3D Core</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background-color: #050B14;
+    user-select: none;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+  }
+  #canvas-container {
+    width: 100%;
+    height: 100%;
+    position: absolute;
+    top: 0;
+    left: 0;
+  }
+  /* Holographic HUD Overlay */
+  #hud-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    align-items: center;
+    box-sizing: border-box;
+    padding: 10px;
+  }
+  .hud-badge {
+    background: linear-gradient(135deg, rgba(6, 18, 33, 0.9), rgba(12, 35, 62, 0.9));
+    border: 1px solid #00E5FF;
+    border-radius: 12px;
+    padding: 4px 14px;
+    color: #00E5FF;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    box-shadow: 0 0 12px rgba(0, 229, 255, 0.3);
+    transition: all 0.25s ease;
+  }
+  .badge-speaking {
+    border-color: #A855F7;
+    color: #E0AAFF;
+    box-shadow: 0 0 16px rgba(168, 85, 247, 0.5);
+  }
+  .dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background-color: #00E676;
+    display: inline-block;
+  }
+  .dot-speaking {
+    background-color: #00E5FF;
+    animation: pulse-dot 0.6s infinite alternate;
+  }
+  @keyframes pulse-dot {
+    0% { transform: scale(0.8); opacity: 0.6; }
+    100% { transform: scale(1.3); opacity: 1.0; }
+  }
+  /* Loading Spinner */
+  #loader {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: #00E5FF;
+    font-size: 12px;
+    font-weight: 700;
+    text-align: center;
+    letter-spacing: 1.5px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+    pointer-events: none;
+    z-index: 10;
+  }
+  .spinner {
+    width: 36px;
+    height: 36px;
+    border: 3px solid rgba(0, 229, 255, 0.2);
+    border-top-color: #00E5FF;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+  /* Equalizer visualizer when speaking */
+  .eq-bars {
+    display: none;
+    align-items: center;
+    gap: 2px;
+    height: 12px;
+  }
+  .eq-bar {
+    width: 2px;
+    background-color: #00E5FF;
+    border-radius: 1px;
+    animation: bounce 0.5s infinite ease-in-out alternate;
+  }
+  .eq-bar:nth-child(1) { height: 4px; animation-delay: 0.1s; }
+  .eq-bar:nth-child(2) { height: 9px; animation-delay: 0.25s; }
+  .eq-bar:nth-child(3) { height: 12px; animation-delay: 0.05s; }
+  .eq-bar:nth-child(4) { height: 6px; animation-delay: 0.3s; }
+  @keyframes bounce {
+    0% { transform: scaleY(0.3); }
+    100% { transform: scaleY(1.0); }
+  }
+</style>
+<script src="three.min.js"></script>
+<script src="GLTFLoader.js"></script>
+<script src="OrbitControls.js"></script>
+</head>
+<body>
+<div id="canvas-container"></div>
+<div id="loader">
+  <div class="spinner"></div>
+  <div id="load-text">INITIALIZING JUDY 3D CORE...</div>
+</div>
+<div id="hud-overlay">
+  <div id="status-badge" class="hud-badge">
+    <span id="status-dot" class="dot"></span>
+    <span id="badge-title">JUDY 3D</span>
+    <div id="eq-container" class="eq-bars">
+      <div class="eq-bar"></div>
+      <div class="eq-bar"></div>
+      <div class="eq-bar"></div>
+      <div class="eq-bar"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  let scene, camera, renderer, currentModel, controls;
+  let isSpeaking = false;
+  let speakTime = 0;
+  let mouseX = 0, mouseY = 0;
+  let targetRotY = 0, targetRotX = 0, targetRotZ = 0;
+  let rings = [];
+
+  // Morph targets and skeletal bones
+  let morphMeshes = [];
+  const bones = {
+    head: null,
+    neck: null,
+    leftEye: null,
+    rightEye: null
+  };
+
+  // Blinking state
+  const blinkState = {
+    timer: 0,
+    nextBlinkTime: 2.5,
+    isBlinking: false,
+    blinkProgress: 0,
+    duration: 0.16,
+    isDouble: false
+  };
+
+  // Eye gaze state
+  const eyeGaze = {
+    currentX: 0,
+    currentY: 0,
+    targetX: 0,
+    targetY: 0,
+    saccadeX: 0,
+    saccadeY: 0,
+    saccadeTimer: 0,
+    nextSaccadeTime: 1.5
+  };
+
+  let lastTime = performance.now();
+
+  const container = document.getElementById('canvas-container');
+  const loaderEl = document.getElementById('loader');
+  const loadText = document.getElementById('load-text');
+  const badgeEl = document.getElementById('status-badge');
+  const dotEl = document.getElementById('status-dot');
+  const titleEl = document.getElementById('badge-title');
+  const eqEl = document.getElementById('eq-container');
+
+  function init() {
+    scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x050B14, 0.045);
+
+    // Camera tightly framing the floating head
+    camera = new THREE.PerspectiveCamera(28, window.innerWidth / window.innerHeight, 0.1, 50);
+    camera.position.set(0, 0.02, 0.58);
+
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.outputEncoding = THREE.sRGBEncoding;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.15;
+    container.appendChild(renderer.domElement);
+
+    controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    controls.enableZoom = true;
+    controls.minDistance = 0.25;
+    controls.maxDistance = 1.6;
+    controls.maxPolarAngle = Math.PI / 1.7;
+    controls.target.set(0, 0.0, 0);
+
+    // --- 3D PORTRAIT STUDIO LIGHTING CENTERED ON HEAD ---
+    const portraitKeyLight = new THREE.DirectionalLight(0xFFF8F2, 1.45);
+    portraitKeyLight.position.set(1.5, 2.0, 2.0);
+    scene.add(portraitKeyLight);
+    window.portraitKeyLight = portraitKeyLight;
+
+    const portraitFillLight = new THREE.DirectionalLight(0xDFE8F4, 0.7);
+    portraitFillLight.position.set(-1.5, 0.8, 1.5);
+    scene.add(portraitFillLight);
+    window.portraitFillLight = portraitFillLight;
+
+    const eyeCatchLight = new THREE.PointLight(0xFFFFFF, 0.95, 4);
+    eyeCatchLight.position.set(0, 0.05, 0.85);
+    scene.add(eyeCatchLight);
+    window.eyeCatchLight = eyeCatchLight;
+
+    const ambientLight = new THREE.AmbientLight(0x282C3C, 0.9);
+    scene.add(ambientLight);
+    window.ambientLight = ambientLight;
+
+    const rimLight = new THREE.DirectionalLight(0x00E5FF, 1.8);
+    rimLight.position.set(-2.0, 1.5, -1.8);
+    scene.add(rimLight);
+    window.rimLight = rimLight;
+
+    const backLight = new THREE.DirectionalLight(0xA855F7, 1.2);
+    backLight.position.set(2.0, -0.8, -1.5);
+    scene.add(backLight);
+    window.backLight = backLight;
+
+    window.speechLight = new THREE.PointLight(0x00E5FF, 0.0, 4);
+    window.speechLight.position.set(0, 0.0, 0.8);
+    scene.add(window.speechLight);
+
+    // --- CYBER GRID FLOOR (Right under neck) ---
+    const gridHelper = new THREE.GridHelper(2, 10, 0x00E5FF, 0x142B45);
+    gridHelper.position.y = -0.32;
+    gridHelper.material.opacity = 0.35;
+    gridHelper.material.transparent = true;
+    scene.add(gridHelper);
+    window.gridHelper = gridHelper;
+
+    // Load Brunette head
+    loadBrunetteHead();
+
+    window.addEventListener('resize', onWindowResize);
+    window.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseleave', () => {
+      window.setCursorGaze(0, 0);
+    });
+
+    animate();
+  }
+
+  function loadBrunetteHead() {
+    loaderEl.style.display = 'flex';
+    loadText.innerText = 'LOADING JUDY 3D HEAD...';
+
+    const loader = new THREE.GLTFLoader();
+
+    loader.load('brunette.glb', (gltf) => {
+      currentModel = gltf.scene;
+      morphMeshes = [];
+
+      // Scan for morph targets, bones, and HIDE full body meshes
+      currentModel.traverse((child) => {
+        if (child.isMesh) {
+          const n = child.name || '';
+          // KEEP ONLY THE HEAD: Hide body, pants, shoes, and jacket
+          if (n === 'Wolf3D_Body' || n === 'Wolf3D_Outfit_Bottom' || n === 'Wolf3D_Outfit_Footwear' || n === 'Wolf3D_Outfit_Top') {
+            child.visible = false;
+          } else {
+            // Keep head, hair, teeth, eyes, glasses
+            child.visible = true;
+            if (child.morphTargetDictionary) {
+              morphMeshes.push(child);
+            }
+          }
+        }
+        if (child.isBone) {
+          const ln = child.name.toLowerCase();
+          if (ln === 'head') bones.head = child;
+          else if (ln === 'neck') bones.neck = child;
+          else if (ln === 'lefteye' || ln === 'eyeleft') bones.leftEye = child;
+          else if (ln === 'righteye' || ln === 'eyeright') bones.rightEye = child;
+          child.userData.origRot = child.rotation.clone();
+        }
+      });
+
+      // Position model so head center (Y ~ 1.59) sits perfectly at (0, 0, 0)
+      currentModel.position.set(0, -1.59, 0);
+      currentModel.scale.set(1, 1, 1);
+      currentModel.rotation.set(0, 0, 0);
+
+      scene.add(currentModel);
+      loaderEl.style.display = 'none';
+    }, (xhr) => {
+      if (xhr.lengthComputable) {
+        const pct = Math.round((xhr.loaded / xhr.total) * 100);
+        loadText.innerText = `LOADING JUDY HEAD (${pct}%)...`;
+      }
+    }, (error) => {
+      console.error('Error loading glTF:', error);
+      loadText.innerText = 'LOAD FAILED: ' + error.message;
+    });
+  }
+
+  function setMorphWeight(targetName, weight) {
+    const clamped = Math.max(0, Math.min(1, weight));
+    for (const m of morphMeshes) {
+      if (m.morphTargetDictionary && m.morphTargetDictionary[targetName] !== undefined) {
+        m.morphTargetInfluences[m.morphTargetDictionary[targetName]] = clamped;
+      }
+    }
+  }
+
+  function onMouseMove(e) {
+    const nx = (e.clientX / window.innerWidth) * 2 - 1;
+    const ny = -(e.clientY / window.innerHeight) * 2 + 1;
+    // In browser client coordinates, top is ny = +1, bottom is ny = -1.
+    // In ui.py, normY is -1 at top, +1 at bottom.
+    // So passing -ny matches ui.py!
+    window.setCursorGaze(nx, -ny);
+  }
+
+  function onWindowResize() {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  }
+
+  // --- EXTERNAL QT BRIDGE FUNCTIONS ---
+  window.setSpeaking = function(speaking) {
+    isSpeaking = Boolean(speaking);
+    if (isSpeaking) {
+      badgeEl.classList.add('badge-speaking');
+      dotEl.className = 'dot dot-speaking';
+      titleEl.innerText = 'SPEAKING';
+      eqEl.style.display = 'flex';
+      if (window.speechLight) window.speechLight.intensity = 2.2;
+    } else {
+      badgeEl.classList.remove('badge-speaking');
+      dotEl.className = 'dot';
+      titleEl.innerText = 'JUDY 3D';
+      eqEl.style.display = 'none';
+      if (window.speechLight) window.speechLight.intensity = 0.0;
+    }
+  };
+
+  /**
+   * Cursor Tracking Bridge:
+   * When cursor moves UP (normY < 0), head tilts UP and eyes look UP.
+   * When cursor moves DOWN (normY > 0), head tilts DOWN and eyes look DOWN.
+   * When cursor moves LEFT (normX < 0), head turns LEFT and eyes look LEFT.
+   * When cursor moves RIGHT (normX > 0), head turns RIGHT and eyes look RIGHT.
+   */
+  window.setCursorGaze = function(normX, normY) {
+    mouseX = Math.max(-1.5, Math.min(1.5, normX));
+    mouseY = Math.max(-1.5, Math.min(1.5, normY));
+
+    // Pitch inversion fix:
+    // When normY is negative (cursor UP), targetRotX is negative -> tilts head UP!
+    // When normY is positive (cursor DOWN), targetRotX is positive -> tilts head DOWN!
+    targetRotY = mouseX * 0.35;        // Left/Right
+    targetRotX = mouseY * 0.28;        // Up/Down (Inverted to fix user issue!)
+    targetRotZ = -mouseX * 0.06;       // Organic subtle head tilt
+
+    eyeGaze.targetX = mouseX * 0.16;   // Eye look Left/Right
+    eyeGaze.targetY = -mouseY * 0.14;  // Eye look Up/Down: Up looks UP, Down looks DOWN
+  };
+
+  window.setTheme = function(cfg) {
+    if (!cfg) return;
+    try {
+      if (cfg.bg) {
+        const c = new THREE.Color(cfg.bg);
+        if (scene && scene.fog) scene.fog.color = c;
+        if (renderer) renderer.setClearColor(c, 1);
+        document.body.style.backgroundColor = cfg.bg;
+      }
+      if (cfg.rimLight && window.rimLight) {
+        window.rimLight.color.set(cfg.rimLight);
+      }
+      if (cfg.accent && window.backLight) {
+        window.backLight.color.set(cfg.accent);
+      }
+      if (cfg.speechLight && window.speechLight) {
+        window.speechLight.color.set(cfg.speechLight);
+      }
+      if (cfg.grid && window.gridHelper) {
+        scene.remove(window.gridHelper);
+        window.gridHelper.geometry.dispose();
+        window.gridHelper.material.dispose();
+        window.gridHelper = new THREE.GridHelper(2, 10, new THREE.Color(cfg.grid), new THREE.Color(cfg.border || 0x142B45));
+        window.gridHelper.position.y = -0.32;
+        window.gridHelper.material.opacity = 0.35;
+        window.gridHelper.material.transparent = true;
+        scene.add(window.gridHelper);
+      }
+      if (cfg.accent) {
+        badgeEl.style.borderColor = cfg.accent;
+        badgeEl.style.color = cfg.accent;
+        dotEl.style.backgroundColor = cfg.accent;
+        const bars = document.querySelectorAll('.eq-bar');
+        bars.forEach(b => b.style.backgroundColor = cfg.accent);
+      }
+    } catch(err) {
+      console.warn("Theme update error:", err);
+    }
+  };
+
+  function animate() {
+    requestAnimationFrame(animate);
+
+    const now = performance.now();
+    const delta = Math.min((now - lastTime) * 0.001, 0.1);
+    lastTime = now;
+    const time = now * 0.001;
+
+    if (currentModel) {
+      // 1. BLINKING SYSTEM
+      blinkState.timer += delta;
+      if (!blinkState.isBlinking && blinkState.timer >= blinkState.nextBlinkTime) {
+        blinkState.isBlinking = true;
+        blinkState.blinkProgress = 0;
+      }
+
+      let blinkAmount = 0;
+      if (blinkState.isBlinking) {
+        blinkState.blinkProgress += delta / blinkState.duration;
+        if (blinkState.blinkProgress >= 1.0) {
+          blinkState.isBlinking = false;
+          blinkState.blinkProgress = 0;
+          if (!blinkState.isDouble && Math.random() < 0.28) {
+            blinkState.isDouble = true;
+            blinkState.nextBlinkTime = blinkState.timer + 0.12;
+          } else {
+            blinkState.isDouble = false;
+            blinkState.nextBlinkTime = blinkState.timer + 3.0 + Math.random() * 3.5;
+          }
+        } else {
+          blinkAmount = Math.sin(blinkState.blinkProgress * Math.PI);
+        }
+      }
+
+      // Eyelid Blinking (ARKit morph targets)
+      setMorphWeight('eyeBlinkLeft', blinkAmount);
+      setMorphWeight('eyeBlinkRight', blinkAmount);
+
+      // 2. EYE SACCADES & GAZE TRACKING
+      eyeGaze.saccadeTimer += delta;
+      if (eyeGaze.saccadeTimer >= eyeGaze.nextSaccadeTime) {
+        eyeGaze.saccadeTimer = 0;
+        eyeGaze.nextSaccadeTime = 1.4 + Math.random() * 2.5;
+        eyeGaze.saccadeX = (Math.random() - 0.5) * 0.05;
+        eyeGaze.saccadeY = (Math.random() - 0.5) * 0.03;
+      }
+
+      const desiredEyeX = eyeGaze.targetX + eyeGaze.saccadeX;
+      const desiredEyeY = eyeGaze.targetY + eyeGaze.saccadeY;
+      eyeGaze.currentX += (desiredEyeX - eyeGaze.currentX) * 0.18;
+      eyeGaze.currentY += (desiredEyeY - eyeGaze.currentY) * 0.18;
+
+      // ARKit Eye Gaze blendshapes:
+      // When eyeGaze.currentY > 0 (cursor is UP), look UP!
+      // When eyeGaze.currentY < 0 (cursor is DOWN), look DOWN!
+      if (eyeGaze.currentX > 0) {
+        setMorphWeight('eyeLookOutLeft', eyeGaze.currentX * 2.2);
+        setMorphWeight('eyeLookInRight', eyeGaze.currentX * 2.2);
+        setMorphWeight('eyeLookInLeft', 0);
+        setMorphWeight('eyeLookOutRight', 0);
+      } else {
+        setMorphWeight('eyeLookInLeft', -eyeGaze.currentX * 2.2);
+        setMorphWeight('eyeLookOutRight', -eyeGaze.currentX * 2.2);
+        setMorphWeight('eyeLookOutLeft', 0);
+        setMorphWeight('eyeLookInRight', 0);
+      }
+
+      if (eyeGaze.currentY > 0) {
+        setMorphWeight('eyeLookUpLeft', eyeGaze.currentY * 2.2);
+        setMorphWeight('eyeLookUpRight', eyeGaze.currentY * 2.2);
+        setMorphWeight('eyeLookDownLeft', 0);
+        setMorphWeight('eyeLookDownRight', 0);
+      } else {
+        setMorphWeight('eyeLookDownLeft', -eyeGaze.currentY * 2.2);
+        setMorphWeight('eyeLookDownRight', -eyeGaze.currentY * 2.2);
+        setMorphWeight('eyeLookUpLeft', 0);
+        setMorphWeight('eyeLookUpRight', 0);
+      }
+
+      // 3. SPEECH LIP-SYNC ARTICULATION & FACIAL EXPRESSIONS
+      if (isSpeaking) {
+        speakTime += delta * 12.0;
+
+        // Multi-frequency speech syllable modulation
+        const speechA = Math.max(0, Math.sin(speakTime * 1.0) * 0.50 + Math.sin(speakTime * 2.2) * 0.35 + Math.sin(speakTime * 0.5) * 0.15);
+        const speechO = Math.max(0, Math.sin(speakTime * 1.8 + 1.0) * 0.45);
+        const speechI = Math.max(0, Math.sin(speakTime * 2.5 + 2.0) * 0.35);
+
+        setMorphWeight('jawOpen', speechA * 0.85);
+        setMorphWeight('mouthOpen', speechA * 0.85);
+        setMorphWeight('viseme_aa', speechA * 0.75);
+
+        setMorphWeight('viseme_O', speechO * 0.6);
+        setMorphWeight('mouthFunnel', speechO * 0.4);
+
+        setMorphWeight('viseme_I', speechI * 0.5);
+
+        // Speaking smile and expressive brows
+        setMorphWeight('mouthSmileLeft', 0.25 + speechA * 0.15);
+        setMorphWeight('mouthSmileRight', 0.25 + speechA * 0.15);
+        setMorphWeight('browInnerUp', 0.15 + Math.sin(speakTime * 0.8) * 0.10);
+
+        if (window.speechLight) window.speechLight.intensity = 1.6 + Math.sin(speakTime * 2.0) * 0.8;
+      } else {
+        // Resting mouth, subtle friendly smile
+        setMorphWeight('jawOpen', 0);
+        setMorphWeight('mouthOpen', 0);
+        setMorphWeight('viseme_aa', 0);
+        setMorphWeight('viseme_O', 0);
+        setMorphWeight('viseme_I', 0);
+        setMorphWeight('mouthFunnel', 0);
+
+        const idleSmile = 0.22 + Math.sin(time * 1.5) * 0.04;
+        setMorphWeight('mouthSmileLeft', idleSmile);
+        setMorphWeight('mouthSmileRight', idleSmile);
+        setMorphWeight('browInnerUp', 0.05);
+
+        if (window.speechLight) window.speechLight.intensity = 0.0;
+      }
+
+      // 4. BONE-BASED HEAD & EYE ROTATIONS
+      // Head tilts UP when cursor is UP, tilts DOWN when cursor is DOWN
+      if (bones.head) {
+        const curHeadY = bones.head.userData.origRot.y + targetRotY * 0.60;
+        const curHeadX = bones.head.userData.origRot.x + targetRotX * 0.50;
+        const curHeadZ = bones.head.userData.origRot.z + targetRotZ * 0.50;
+
+        bones.head.rotation.y += (curHeadY - bones.head.rotation.y) * 0.12;
+        bones.head.rotation.x += (curHeadX - bones.head.rotation.x) * 0.12;
+        bones.head.rotation.z += (curHeadZ - bones.head.rotation.z) * 0.12;
+      }
+      if (bones.neck) {
+        const curNeckY = bones.neck.userData.origRot.y + targetRotY * 0.25;
+        const curNeckX = bones.neck.userData.origRot.x + targetRotX * 0.20;
+        bones.neck.rotation.y += (curNeckY - bones.neck.rotation.y) * 0.08;
+        bones.neck.rotation.x += (curNeckX - bones.neck.rotation.x) * 0.08;
+      }
+      if (bones.leftEye) {
+        bones.leftEye.rotation.y = bones.leftEye.userData.origRot.y + eyeGaze.currentX * 0.4;
+        bones.leftEye.rotation.x = bones.leftEye.userData.origRot.x - eyeGaze.currentY * 0.4;
+      }
+      if (bones.rightEye) {
+        bones.rightEye.rotation.y = bones.rightEye.userData.origRot.y + eyeGaze.currentX * 0.4;
+        bones.rightEye.rotation.x = bones.rightEye.userData.origRot.x - eyeGaze.currentY * 0.4;
+      }
+
+      // Subtle idle breathing float on the head
+      const idleBreathe = Math.sin(time * 1.6) * 0.005;
+      currentModel.position.y = -1.59 + idleBreathe;
+    }
+
+    controls.update();
+    renderer.render(scene, camera);
+  }
+
+  window.onload = init;
+</script>
+</body>
+</html>

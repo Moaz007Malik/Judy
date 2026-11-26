@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.env
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.eggs/
+
+# Local config / user data / secrets
+config.json
+logs/
+*.sqlite3
+*.sqlite
+*.db
+
+# Build / installer outputs
+dist/
+build/
+*.spec
+installer/*.exe
+installer/*.msi
+installer/*.zip
+installer/*.dmg
+
+# Scratch and generated junk
+scratch/
+*.mp3
+
+# Oversized 3D payload (228 MB) — GitHub rejects files over 100 MB
+Judy/scene.bin
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
